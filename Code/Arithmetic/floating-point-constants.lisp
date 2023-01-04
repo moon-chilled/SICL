@@ -27,3 +27,10 @@
 (defconstant             most-negative-long-float             most-negative-double-float)
 (defconstant            least-negative-long-float            least-negative-double-float)
 (defconstant least-negative-normalized-long-float least-negative-normalized-double-float)
+
+;; may be derived as (buoy:double-next-after (* 0.5d0 (- (buoy:double-next-after 1d0) 1d0)))
+;; only correct in nearest/even, obviously; breaks in other rounding modes
+(defconstant single-float-epsilon (float-features:bits-single-float #x33800001))
+(defconstant double-float-epsilon (float-features:bits-double-float #x3CA0000000000001))
+(defconstant short-float-epsilon single-float-epsilon)
+(defconstant long-float-epsilon double-float-epsilon)
