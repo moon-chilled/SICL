@@ -74,6 +74,9 @@
               (inst cvttsd2si res float)))
 |#
 
+(declaim (inline buoy::ftrunc))
+(declaim (ftype (function (double-float) double-float) ftrunc))
+
 #+x86-64
 (progn
   (defknown buoy::round-double (double-float (member :round :floor :ceiling :truncate))

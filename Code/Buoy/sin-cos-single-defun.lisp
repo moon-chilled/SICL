@@ -46,12 +46,14 @@
 
 (declaim (ftype (function (single-float) (single-float -1s0 1s0)) cos-single sin-single))
 
-(defun cos-single (x &aux (xi (logand #x7fffffff (single-float-unsigned-bits x))))
+(defun cos-single (x &aux (x (abs x)) (xi (single-float-unsigned-bits x))
+                       ;(xi (logand #x7fffffff (single-float-unsigned-bits x)))
+                       )
   (declare (optimize (speed 3) (safety 0)))
   (cond
-    ((< xi #x39800001) 1s0) ; that is ~2.44e-4; floats in that range round to 1
+    ((< x (b2s #x39800001)) 1s0) ; that is ~2.44e-4; floats in that range round to 1
     ;((>= xi #x7f800000) (- x x)) ; infinities and nans live there.  NB. this can be handled w/o a branch using avx512 fixup.  Or we can ensure the following computations induce nan/trap for inf/nan input?
-    ((< xi #x3C490FDB) ; <~0.0123; for numbers in this range, we approximate using a low-degree polynomial
+    ((< x (b2s #x3C490FDB)) ; <~0.0123; for numbers in this range, we approximate using a low-degree polynomial
      (let* ((xd (coerce x 'double-float))
             (x2 (* xd xd)))
        (coerce
@@ -64,12 +66,12 @@
     (t
      ;; slower path; start with range reduction
      ;; reduce x modulo 256*pi
-     (let ((xd (coerce (abs x) 'double-float))) ; xi was abs'd, but x was not yet; fine for the above, since it's immediately squared, but not here
+     (let ((xd (coerce x 'double-float))) ; xi was abs'd, but x was not yet; fine for the above, since it's immediately squared, but not here
        (multiple-value-bind (q r) ; quotient and fractional remainder after division by pi
-           (if (< xi #x4a000000)
+           (if (< x (b2s #x4a000000))
                ;; <2097152; numbers in this range can be range-reduced with a lower-precision pi constant
                (let* ((q (the (double-float 1d0 1.8d8) (* xd (b2d #x40545f306c000000)))) ; first quotient approximation; multiply by ~256/pi
-                      (tq (round-double q :truncate))                  ; truncated quotient
+                      (tq (ftrunc q))                  ; truncated quotient
                       (iq (the (integer 0 170891318) (truncate q))) ; integer quotient
                       (r (- q tq))                        ; remainder estimate
                       (r (fma-double r xd (b2d #x3e9c9c882a53f84f)))) ; refine remainder estimate using some lower bits of 256/pi
@@ -78,20 +80,23 @@
                      (values iq r)))
                ;; >=2097152; numbers in this range need a higher-precision pi constant
                ;; early-out on what I assume are hard-to-round cases
-               (cond ((eql xi #x5922AA80) (return-from cos-single (b2s #x3f08aebf)))
-                     ((eql xi #x6A127977) (return-from cos-single (b2s #x3ed7ae35)))
-                     ((eql xi #x7908CD73) (return-from cos-single (b2s #x3f798bb5)))
-                     ((eql xi #x7A38AB34) (return-from cos-single (b2s #x3f7b3195)))
-                     (t ;todo this branch is broken
-                      (let* ((e (+ -127 (ldb (byte 7 23) xi)))
-                               ;; extract mantissa.  Will always be normal, since we've already taken care of the denormal range, so this is cheaper than integer-decode-float
-                               (m (logior (ash 1 23) (ldb (byte 23 0) xi)))
-                               ;; 256-bit fixedpoint pi.  Might be a bit faster to do the math by hand, as the c version does, but meh
-                               (qb (* m #xa2f9836e4e441529fc2757d1f534ddc0db6295993c439041fe5163abdebbc562))
-                               (i (- 162 e))
-                               (q (ldb (byte 64 (+ 64 i)) qb))
-                               (r (ldb (byte 64 i) qb)))
-                          (values q (* (coerce r 'double-float) #.(scale-float 1d0 -64)))))))  ; r 0.64 fixedpoint->fractional
+               (cond ((eql x (b2s #x5922AA80)) (return-from cos-single (b2s #x3f08aebf)))
+                     ((eql x (b2s #x6A127977)) (return-from cos-single (b2s #x3ed7ae35)))
+                     ((eql x (b2s #x7908CD73)) (return-from cos-single (b2s #x3f798bb5)))
+                     ((eql x (b2s #x7A38AB34)) (return-from cos-single (b2s #x3f7b3195)))
+                     (t
+                      ;; todo can tweak e and m and implement this as an unaligned memory op
+                      (let* ((e (+ -127 (ldb (byte 8 23) xi)))
+                             ;; extract mantissa.  Will always be normal, since we've already taken care of the denormal range, so this is cheaper than integer-decode-float
+                             (m (logior (ash 1 23) (ldb (byte 23 0) xi)))
+                             ;; 256-bit fixedpoint pi.  Might be a bit faster to do the math by hand, as the c version does, but meh
+                             (qb (* m #xa2f9836e4e441529fc2757d1f534ddc0db6295993c439041fe5163abdebbc562))
+                             (i (- 208 e))
+                             ;; only need 9 of these bits; 8 are fractional (pi/256), 9th is sign
+                             (q (ldb (byte 9 (+ 64 i)) qb))
+                             ;; need all 64 bits, unfortunately
+                             (r (ldb (byte 64 i) qb)))
+                        (values q (* (coerce r 'double-float) #.(scale-float 1d0 -64)))))))  ; r 0.64 fixedpoint->fractional
 ;for 0.3, have 3fdc8e8b692c3d26; should be 3fdc8e8b692c3d27
          ;; defractionalise remainder
          (let ((r (* r +pi/256+))
@@ -106,19 +111,16 @@
                             (+ (logand 128 q)
                                (logxor qr (lognot (1- (logand 1 qq))))))))
                ;; don't need to account for the sign of cosq/sinq; we will correct it in the result
-               (let (
-                     ;(sinq (aref +double-cos-*256+ qi))
-                     ;(cosq (aref +double-sin-*256+ qi))
-                     ;(sinq (aref +double-sin-cos-*256+ qi 1))
+               (let (;(sinq (aref +double-sin-cos-*256+ qi 1))
                      ;(cosq (aref +double-sin-cos-*256+ qi 0))
+                     ;(sinq (row-major-aref +double-sin-cos-*256+ (1+ (* 2 qi))))
+                     ;(cosq (row-major-aref +double-sin-cos-*256+ (* 2 qi)))
                      (sinq (aref +double-sin-cos-flat-*256+ (1+ (* 2 qi))))
-                     (cosq (aref +double-sin-cos-flat-*256+ (* 2 qi)))
-                     )
+                     (cosq (aref +double-sin-cos-flat-*256+ (* 2 qi))))
                  (let ((sinr (odd-polynomial double-float r #.(b2d #x3ff0000000000001) #.(b2d #xbfc55555555d3760) #.(b2d #x3f81111de524b6f0))) ; ~ x - 1/6x³ + 1/120x⁵
                        (cosr (even-polynomial double-float r #.(b2d #x3feffffffffffffc) #.(b2d #xbfdffffffff83643) #.(b2d #x3fa555488594da9d)))) ; ~ 1 - 1/2x² + 1/24x⁴
-                   (* (if (logbitp 1 qq) -1s0 1s0)
-                      (+ (- x x)
-                      (coerce
-                       (fma-double (* cosq cosr) sinq sinr)
-                       'single-float)))))))))))))
+                   (+ (- x x)
+                      (* (if (logbitp 1 qq) -1s0 1s0)
+                         (coerce (fma-double (* cosq cosr) sinq sinr)
+                                 'single-float)))))))))))))
              
